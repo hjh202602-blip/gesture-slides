@@ -1154,34 +1154,63 @@ function pushMotion(side, id, now, seen) {
   seen[side][id] = now;
 }
 
+// 쓸기 판정 기준 (길이는 어깨너비 W 배수)
+const SWIPE = {
+  windowMs: 700, // 이 시간 안에 움직인 거리로 판정
+  minDist: 0.6, // 옆으로 이만큼 움직이면 쓸기
+  maxSlope: 0.8, // 위아래로 흔들린 정도가 옆 이동의 이 비율보다 작아야 함 (살짝 휘어도 됨)
+  gapMs: 250, // 손을 이 시간보다 짧게 놓치면 이어서 셈 (빠르게 움직이면 흐려져서 잠깐 놓침)
+  jump: 0.7, // 한 프레임에 이보다 멀리 튀면 손을 잘못 짚은 것으로 보고 처음부터 셈
+  pointHoldMs: 250, // 검지를 이만큼 계속 세우고 있어야 화면 이동으로 보고 쓸기에서 뺌
+};
+const pointSince = { L: 0, R: 0 };
+let lastFrame = null; // 몸이 잠깐 안 보일 때 쓸 마지막 어깨 위치·너비
+
 function detectSwipes(body, handBySide, now, seen) {
-  const W = body.W;
+  if (body) lastFrame = { W: body.W, shoulderY: body.shoulderY };
+  if (!lastFrame) return;
+  const { W, shoulderY } = lastFrame;
   for (const s of SIDES) {
-    // 검지를 세우고 움직이는 중(화면 이동)에는 쓸기로 보지 않음
+    const h = hist[s];
     const hand = handBySide[s];
-    const pointing = hand?.shown && hand.shape === "point";
-    // 포즈 손목이 흐리면 손 모델의 손목을 씀
-    const pos = body[s].w.v > 0.5 ? body[s].w : hand?.wrist;
-    // 손이 허리보다 아래면 무시 (걷거나 팔을 내리는 움직임)
-    if (pointing || !pos || pos.y > body.shoulderY + 1.8 * W) {
-      hist[s].length = 0;
+
+    // 검지를 세우고 움직이는 중(화면 이동·그리기)에는 쓸기로 보지 않음.
+    // 손이 움직이다 잠깐 검지처럼 보이는 건 무시하도록 일정 시간 유지됐을 때만 뺌
+    if (hand?.shown && hand.shape === "point") pointSince[s] ||= now;
+    else pointSince[s] = 0;
+    if (pointSince[s] && now - pointSince[s] > SWIPE.pointHoldMs) {
+      h.length = 0;
       continue;
     }
-    const h = hist[s];
-    h.push({ t: now, x: -pos.x, y: pos.y }); // 거울 기준: 화면 오른쪽이 +
-    while (now - h[0].t > 600) h.shift();
+
+    // 손 모델의 손목이 몸 앞에서 더 정확함. 없으면 포즈의 손목(조금 흐려도 씀)
+    const pose = body?.[s].w;
+    const pos = hand?.wrist ?? (pose && pose.v > 0.3 ? pose : null);
+    if (!pos) {
+      if (h.length && now - h.at(-1).t > SWIPE.gapMs) h.length = 0;
+      continue;
+    }
+    // 손이 허리보다 아래면 무시 (걷거나 팔을 내리는 움직임)
+    if (pos.y > shoulderY + 2.2 * W) {
+      h.length = 0;
+      continue;
+    }
+    const p = { t: now, x: -pos.x, y: pos.y }; // 거울 기준: 화면 오른쪽이 +
+    const prevP = h.at(-1);
+    if (prevP && (now - prevP.t > SWIPE.gapMs || Math.hypot(p.x - prevP.x, p.y - prevP.y) > SWIPE.jump * W)) h.length = 0;
+    h.push(p);
+    while (now - h[0].t > SWIPE.windowMs) h.shift();
     if (now < sideCooldown[s] || h.length < 3) continue;
 
-    // 최근 0.6초 안에서 지금 위치와 가장 멀리 떨어진 지점까지의 이동
-    const lastP = h.at(-1);
+    // 최근 0.7초 안에서 지금 위치와 가장 멀리 떨어진 지점까지의 이동
     let dx = 0, dy = 0;
-    for (const p of h) {
-      if (Math.hypot(lastP.x - p.x, lastP.y - p.y) > Math.hypot(dx, dy)) {
-        dx = lastP.x - p.x;
-        dy = lastP.y - p.y;
+    for (const q of h) {
+      if (Math.hypot(p.x - q.x, p.y - q.y) > Math.hypot(dx, dy)) {
+        dx = p.x - q.x;
+        dy = p.y - q.y;
       }
     }
-    if (!(Math.abs(dx) > 0.8 * W && Math.abs(dy) < 0.6 * Math.abs(dx))) continue;
+    if (!(Math.abs(dx) > SWIPE.minDist * W && Math.abs(dy) < SWIPE.maxSlope * Math.abs(dx))) continue;
     const id = dx > 0 ? "swipeR" : "swipeL";
     if (backBlock[s] && backBlock[s].id === id && now < backBlock[s].until) {
       h.length = 0;
@@ -1506,8 +1535,6 @@ function onFrame(lm, hands, handedness, now) {
     }
     drawArm(ctx, L, body.state.L);
     drawArm(ctx, R, body.state.R);
-  } else {
-    hist.L.length = hist.R.length = 0;
   }
 
   const handInfos = hands.map((h, i) => handInfo(h, handedness[i]));
@@ -1526,7 +1553,7 @@ function onFrame(lm, hands, handedness, now) {
     if (m) act[s].add(m);
   }
   const seen = labSeen;
-  if (body) detectSwipes(body, handBySide, now, seen);
+  detectSwipes(body, handBySide, now, seen);
   detectFistOpen(handBySide, now, seen);
 
   const { holding, hits } = evaluate(act, now, labOpen);
