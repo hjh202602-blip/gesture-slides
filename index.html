@@ -17,7 +17,17 @@
       <span class="lbl">발표자료 열기</span>
       <input id="file" type="file" accept="application/pdf,image/*" multiple hidden>
     </label>
+    <span id="deckName" class="deck-name"></span>
     <span class="spacer"></span>
+    <button id="exportBtn" class="btn ghost" title="글씨를 쓴 그대로 PDF 파일로 저장해요" disabled>
+      <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+      <span class="lbl">판서 포함 저장</span>
+    </button>
+    <button id="presenterBtn" class="btn ghost" title="다음 슬라이드 · 메모 · 시간을 보는 창을 따로 열어요 (노트북 화면에 두고 쓰세요)">
+      <svg class="ic" viewBox="0 0 24 24"><rect x="2" y="4" width="13" height="10" rx="1.5"/><path d="M18 7h4v7h-4"/><path d="M8 14v4"/><path d="M5 20h6"/></svg>
+      <span class="lbl">발표자 화면</span>
+    </button>
+    <span class="sep"></span>
     <button id="testBtn" class="btn ghost" title="손동작이 어떻게 인식되는지 미리 확인해요">
       <svg class="ic" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.3l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15"/></svg>
       <span class="lbl">동작 실험하기</span>
@@ -43,7 +53,8 @@
       <h2>사용 방법</h2>
       <p class="hint">발표 시작을 누르면 카메라가 켜지고 동작으로 넘길 수 있어요. 동작 연결은 동작 설정에서 바꿔요.</p>
       <p class="hint">확대했을 때는 마우스로 슬라이드를 잡고 끌어서 옮길 수 있어요. 그리기를 켜면 마우스로 글씨를 쓸 수 있어요.</p>
-      <p class="hint keys"><kbd>←</kbd><kbd>→</kbd> 넘기기 <kbd>Home</kbd><kbd>End</kbd> 처음·끝 <kbd>O</kbd> 목록 <kbd>+</kbd><kbd>−</kbd><kbd>0</kbd> 확대·축소 <kbd>F</kbd> 전체화면</p>
+      <p class="hint">연 자료와 쓴 글씨, 발표자 화면의 메모는 이 브라우저에 남아서 새로고침해도 그대로예요. 판서 포함 저장을 누르면 글씨까지 들어간 PDF로 받을 수 있어요.</p>
+      <p class="hint keys"><kbd>←</kbd><kbd>→</kbd> 넘기기 <kbd>Home</kbd><kbd>End</kbd> 처음·끝 <kbd>O</kbd> 목록 <kbd>+</kbd><kbd>−</kbd><kbd>0</kbd> 확대·축소 <kbd>F</kbd> 전체화면 <kbd>Ctrl</kbd><kbd>Z</kbd> 글씨 되돌리기 <kbd>P</kbd> 동작 인식 멈춤</p>
     </div>
     <div id="sheet">
       <canvas id="slide"></canvas>
@@ -52,6 +63,7 @@
     <div id="grid"></div>
     <div id="pointer" class="cursor"><svg viewBox="0 0 24 24"><path d="M12 2l3 3h-2v5h5V8l3 3-3 3v-2h-5v5h2l-3 3-3-3h2v-5H6v2l-3-3 3-3v2h5V5H9z"/></svg></div>
     <div id="drawCursor" class="cursor"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75zM20.7 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75z"/></svg></div>
+    <div id="pauseBadge"><svg class="ic" viewBox="0 0 24 24"><path d="M9 5v14"/><path d="M15 5v14"/></svg>동작 인식 멈춤</div>
     <div id="toast"></div>
   </main>
 
@@ -69,6 +81,9 @@
         <button class="tool" data-tool="hl" title="형광펜" aria-label="형광펜"></button>
         <button class="tool" data-tool="eraser" title="지우개" aria-label="지우개"></button>
       </span>
+      <button id="undoInk" class="btn ghost icon" title="방금 쓴 글씨 되돌리기 (Ctrl+Z)" aria-label="방금 쓴 글씨 되돌리기">
+        <svg class="ic" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+      </button>
       <button id="clearInk" class="btn ghost icon" title="이 슬라이드의 글씨 모두 지우기" aria-label="이 슬라이드의 글씨 모두 지우기">
         <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
@@ -96,6 +111,7 @@
     </div>
 
     <div class="dock-group end">
+      <button id="timerBtn" class="btn ghost timer" title="발표 시간 (발표 시작부터 잼 · 누르면 0으로)">00:00</button>
       <button id="fsBtn" class="btn ghost icon" title="전체화면" aria-label="전체화면">
         <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
       </button>
@@ -150,6 +166,22 @@
         </div>
         <p class="note">쓸기 같은 움직임 동작은 이 값과 관계없이 움직이는 순간 실행돼요.</p>
       </section>
+
+      <section class="set-sec">
+        <div class="sec-head"><h3>설정 파일</h3></div>
+        <p class="note">지금 적용된 동작 연결, 사용 스위치, 내 동작, 민감도를 파일 하나로 저장해요. 다른 컴퓨터나 브라우저에서 불러오면 같은 설정으로 발표할 수 있어요. (불러오면 바로 적용돼요)</p>
+        <div class="file-row">
+          <button id="exportSet" class="btn">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            <span>설정 내보내기</span>
+          </button>
+          <label class="btn">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/></svg>
+            <span>설정 불러오기</span>
+            <input id="importSet" type="file" accept="application/json,.json" hidden>
+          </label>
+        </div>
+      </section>
     </div>
 
     <div class="apply-bar">
@@ -194,6 +226,7 @@
     <div id="camBar" title="끌어서 옮길 수 있어요">
       <svg class="grip" viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg>
       <span class="cam-title">내 카메라</span>
+      <button id="camPause" class="cam-btn" title="동작 인식 잠시 멈춤 (P)"><svg class="ic" viewBox="0 0 24 24"><path d="M9 5v14"/><path d="M15 5v14"/></svg></button>
       <button id="camToggle" class="cam-btn" title="카메라 숨기기"><svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     </div>
     <div id="camView">

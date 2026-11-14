@@ -23,13 +23,19 @@ let renderToken = 0;
 let zoom = 1;
 const pan = { x: 0, y: 0 }; // 확대했을 때 화면을 옮긴 정도(px)
 
-async function loadFiles(fileList) {
+let deckId = 0; // 지금 열린 자료 (새로 열 때마다 바뀜)
+let deckName = "";
+
+// restore: 새로고침 전에 저장해 둔 { id, current, inks, notes } (있으면 그대로 되살림)
+async function loadFiles(fileList, restore) {
   const files = [...fileList];
   if (!files.length) return;
   const pdf = files.find((f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"));
+  let name = "";
   try {
     if (pdf) {
       const doc = await pdfjsLib.getDocument({ data: await pdf.arrayBuffer() }).promise;
+      name = pdf.name;
       slides = [];
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
@@ -50,6 +56,7 @@ async function loadFiles(fileList) {
         .filter((f) => f.type.startsWith("image/"))
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
       const bitmaps = await Promise.all(images.map((f) => createImageBitmap(f)));
+      name = images.length > 1 ? `${images[0].name} 외 ${images.length - 1}장` : images[0]?.name ?? "";
       slides = bitmaps.map((bmp) => ({
         w: bmp.width,
         h: bmp.height,
@@ -68,10 +75,25 @@ async function loadFiles(fileList) {
   }
   if (!slides.length) return toast("PDF나 이미지 파일을 올려주세요");
   stage.classList.add("has-deck");
+  deckName = name;
+  $("deckName").textContent = name;
+  $("deckName").title = name;
+  $("exportBtn").disabled = false;
   inks.clear();
+  notes.clear();
+  undoStack.length = 0;
   thumbsBuilt = false;
   closeOverview(false);
-  go(0);
+  if (restore) {
+    deckId = restore.id;
+    for (const [i, v] of restore.inks || []) inks.set(i, v);
+    for (const [i, v] of restore.notes || []) notes.set(i, v);
+    go(clamp(restore.current ?? 0, 0, slides.length - 1));
+  } else {
+    deckId = Date.now();
+    idbSet("files", { id: deckId, name, files }).catch((err) => console.warn("자료를 저장하지 못했어요", err));
+    go(0);
+  }
 }
 
 async function render() {
@@ -95,6 +117,7 @@ async function render() {
   drawInk();
   updateEraserSize();
   counter.textContent = `${current + 1} / ${slides.length}`;
+  presenterSoon();
 }
 
 // 슬라이드가 화면 밖으로 빠지지 않는 범위에서만 옮김
@@ -119,6 +142,7 @@ function go(i) {
   zoom = 1;
   pan.x = pan.y = 0;
   render();
+  persistSoon();
 }
 
 function next() {
@@ -317,18 +341,46 @@ function slidePoint(clientX, clientY) {
   const r = sheet.getBoundingClientRect();
   return [(clientX - r.left) / r.width, (clientY - r.top) / r.height];
 }
+// 되돌리기: 바뀌기 전 그 슬라이드의 획 목록을 쌓아 둠 (Ctrl+Z 한 번 = 획 하나 또는 모두 지우기 하나)
+const undoStack = []; // { i: 슬라이드 번호, before: 획 목록 }
+function remember() {
+  undoStack.push({ i: current, before: [...(inks.get(current) || [])] });
+  if (undoStack.length > 300) undoStack.shift();
+}
+function undoInk() {
+  for (let k = undoStack.length - 1; k >= 0; k--) {
+    if (undoStack[k].i !== current) continue;
+    const { before } = undoStack.splice(k, 1)[0];
+    if (before.length) inks.set(current, before);
+    else inks.delete(current);
+    inkChanged();
+    return toast("되돌렸어요");
+  }
+  toast("이 슬라이드에서 되돌릴 글씨가 없어요");
+}
+
+// 글씨가 바뀔 때마다: 화면에 그리고, 저장하고, 발표자 화면에 알림
+let inkVer = 0;
+function inkChanged() {
+  inkVer++;
+  scheduleInk();
+  persistSoon();
+  presenterSoon(400);
+}
+
 function beginStroke(p) {
   if (!slides.length || overview) return null;
+  remember();
   const st = { tool, pts: [p] };
   if (!inks.has(current)) inks.set(current, []);
   inks.get(current).push(st);
-  scheduleInk();
+  inkChanged();
   return st;
 }
 function extendStroke(st, p) {
   if (!st) return;
   st.pts.push(p);
-  scheduleInk();
+  inkChanged();
 }
 
 let inkQueued = false;
@@ -352,8 +404,13 @@ function drawInk() {
   }
   const ctx = inkCanvas.getContext("2d");
   ctx.clearRect(0, 0, cw, ch);
+  paintInk(ctx, inks.get(current) || [], cw, ch);
+}
+
+// 획 목록을 cw × ch 크기 캔버스에 그림 (화면 · PDF 저장 · 발표자 화면이 같이 씀)
+function paintInk(ctx, strokes, cw, ch) {
   ctx.lineCap = ctx.lineJoin = "round";
-  for (const st of inks.get(current) || []) {
+  for (const st of strokes) {
     const pen = PENS[st.tool];
     // 지우개는 그 아래 그려진 획을 투명하게 깎아냄
     ctx.globalCompositeOperation = st.tool === "eraser" ? "destination-out" : "source-over";
@@ -371,9 +428,82 @@ function drawInk() {
 
 function clearInk() {
   if (!inks.get(current)?.length) return;
+  remember();
   inks.delete(current);
-  drawInk();
-  toast("이 슬라이드의 글씨를 지웠어요");
+  inkChanged();
+  toast("이 슬라이드의 글씨를 지웠어요 (Ctrl+Z로 되돌리기)");
+}
+
+// 슬라이드 하나를 글씨까지 합쳐 긴 변이 longSide px인 캔버스로 만듦 (흰 바탕)
+async function slideImage(i, longSide) {
+  const s = slides[i];
+  const scale = longSide / Math.max(s.w, s.h);
+  const page = document.createElement("canvas");
+  await s.draw(page, scale);
+  const out = document.createElement("canvas");
+  out.width = page.width;
+  out.height = page.height;
+  const ctx = out.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(page, 0, 0);
+  const strokes = inks.get(i);
+  if (strokes?.length) {
+    // 지우개가 슬라이드까지 지우지 않도록 글씨는 따로 그린 뒤 얹음
+    const layer = document.createElement("canvas");
+    layer.width = out.width;
+    layer.height = out.height;
+    paintInk(layer.getContext("2d"), strokes, out.width, out.height);
+    ctx.drawImage(layer, 0, 0);
+  }
+  return out;
+}
+
+/* ---------- 글씨 포함 PDF로 저장 ---------- */
+
+let jspdfReady = null;
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = res;
+    s.onerror = () => rej(new Error("PDF 도구를 불러오지 못했어요"));
+    document.head.append(s);
+  });
+}
+let exporting = false;
+async function exportPdf() {
+  if (!slides.length) return toast("먼저 발표자료를 열어주세요");
+  if (exporting) return;
+  exporting = true;
+  const btn = $("exportBtn");
+  btn.disabled = true;
+  const deck = slides;
+  try {
+    jspdfReady ||= loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+    await jspdfReady;
+    const { jsPDF } = window.jspdf;
+    let doc = null;
+    for (let i = 0; i < deck.length; i++) {
+      if (deck !== slides) throw new Error("저장하는 동안 다른 자료를 열었어요");
+      toast(`PDF 만드는 중… ${i + 1} / ${deck.length}`);
+      const s = deck[i];
+      const img = await slideImage(i, 2000);
+      const o = s.w >= s.h ? "landscape" : "portrait";
+      if (!doc) doc = new jsPDF({ orientation: o, unit: "pt", format: [s.w, s.h], compress: true });
+      else doc.addPage([s.w, s.h], o);
+      doc.addImage(img.toDataURL("image/jpeg", 0.9), "JPEG", 0, 0, s.w, s.h);
+    }
+    const base = (deckName.replace(/\.pdf$/i, "").replace(/ 외 \d+장$/, "").replace(/\.[a-z0-9]+$/i, "") || "발표자료").trim();
+    doc.save(`${base} (판서 포함).pdf`);
+    toast("판서를 포함한 PDF로 저장했어요");
+  } catch (err) {
+    console.error(err);
+    toast(err.message || "PDF로 저장하지 못했어요");
+  } finally {
+    exporting = false;
+    btn.disabled = !slides.length;
+  }
 }
 
 /* ---------- 알림 · 전체화면 ---------- */
@@ -406,6 +536,8 @@ const ACTIONS = [
   { id: "last", label: "마지막 슬라이드로", run: last },
   { id: "draw", label: "그리기/지우기 (손가락 끝으로)", continuous: true },
   { id: "nextPen", label: "다음 도구 (빨→파→검→형광→지우개)", run: nextTool },
+  // always = 동작 인식을 멈춘 동안에도 실행 (멈춘 걸 다시 풀어야 하니까)
+  { id: "pause", label: "동작 인식 잠시 멈춤 / 다시 시작", run: () => togglePause(), always: true },
 ];
 const ACTION_BY_ID = Object.fromEntries(ACTIONS.map((a) => [a.id, a]));
 
@@ -456,6 +588,7 @@ const DEFAULTS = {
     last: ["L:vsign"],
     draw: ["L:point"],
     nextPen: ["L:thumbUp"],
+    pause: ["B:armsUp"],
   },
   enabled: Object.fromEntries(ACTIONS.map((a) => [a.id, true])),
   custom: [], // { id, name, side, feat }
@@ -469,22 +602,47 @@ let settings = loadSettings();
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s) {
-      const mapping = structuredClone(DEFAULTS.mapping);
-      for (const [k, v] of Object.entries(s.mapping || {})) {
-        if (mapping[k] && Array.isArray(v) && v.length) mapping[k] = v.filter((x) => typeof x === "string");
-      }
-      return {
-        ...structuredClone(DEFAULTS),
-        ...s,
-        mapping,
-        enabled: { ...DEFAULTS.enabled, ...s.enabled },
-        hold: (s.ver ?? 0) < 6 ? DEFAULTS.hold : s.hold, // 기본 민감도가 0.45초로 바뀜
-        ver: DEFAULTS.ver,
-      };
-    }
+    if (s) return normalizeSettings(s);
   } catch {}
   return structuredClone(DEFAULTS);
+}
+
+// 저장된 설정이나 불러온 설정 파일을 지금 버전에 맞게 정리 (모르는 값은 버리고 빠진 값은 기본값)
+function normalizeSettings(s) {
+  const custom = (Array.isArray(s.custom) ? s.custom : []).filter(
+    (c) =>
+      c && typeof c.id === "string" && typeof c.name === "string" && (c.side === "L" || c.side === "R") &&
+      Array.isArray(c.feat?.pose) && Array.isArray(c.feat?.hand),
+  );
+  const known = (k) => {
+    if (typeof k !== "string") return false;
+    const [side, id] = k.split(":");
+    if (side === "B") return TWO_HAND_GESTURES.some((t) => t.id === id);
+    if (side !== "L" && side !== "R") return false;
+    return HAND_GESTURES.some((g) => g.id === id) || custom.some((c) => c.id === id && c.side === side);
+  };
+  const mapping = structuredClone(DEFAULTS.mapping);
+  const stored = s.mapping && typeof s.mapping === "object" ? s.mapping : {};
+  for (const [k, v] of Object.entries(stored)) {
+    const keys = Array.isArray(v) ? v.filter(known) : [];
+    if (mapping[k] && keys.length) mapping[k] = keys;
+  }
+  const enabled = { ...DEFAULTS.enabled };
+  for (const a of ACTIONS) if (typeof s.enabled?.[a.id] === "boolean") enabled[a.id] = s.enabled[a.id];
+  // 새로 생긴 기능의 기본 동작이 이미 다른 기능에 쓰이고 있으면 그 기능은 꺼 둠
+  for (const a of ACTIONS) {
+    if (stored[a.id]) continue;
+    const used = ACTIONS.filter((b) => b.id !== a.id).flatMap((b) => mapping[b.id]);
+    if (mapping[a.id].some((k) => used.includes(k))) enabled[a.id] = false;
+  }
+  const hold = Number.isFinite(s.hold) ? clamp(Math.round(s.hold), 200, 1200) : DEFAULTS.hold;
+  return {
+    mapping,
+    enabled,
+    custom,
+    hold: (s.ver ?? 0) < 6 ? DEFAULTS.hold : hold, // 기본 민감도가 0.45초로 바뀜
+    ver: DEFAULTS.ver,
+  };
 }
 function saveSettings() {
   try {
@@ -590,6 +748,7 @@ function gestureSelect(value, onChange) {
 
 // 설정 화면에서 기능을 보여주는 묶음 (보여주는 순서만 정함)
 const MAP_GROUPS = [
+  { title: "발표 진행", ids: ["pause"] },
   { title: "슬라이드 넘기기", ids: ["next", "prev", "first", "last", "overview"] },
   { title: "확대와 화면 이동", ids: ["zoomIn", "zoomOut", "zoomReset", "pan"] },
   { title: "그리기", ids: ["draw", "nextPen"] },
@@ -599,6 +758,7 @@ const ICON = {
   plus: '<svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
   play: '<svg class="ic fill" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></svg>',
   close: '<svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
+  pause: '<svg class="ic" viewBox="0 0 24 24"><path d="M9 5v14"/><path d="M15 5v14"/></svg>',
   restore: '<svg class="ic" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>',
 };
 
@@ -822,6 +982,35 @@ $("resetBtn").addEventListener("click", () => {
   toast("기본값을 불러왔어요. 적용을 눌러야 반영돼요");
 });
 applyBtn.addEventListener("click", applyDraft);
+
+// 설정 파일: 지금 적용된 설정(연결 · 사용 스위치 · 내 동작 · 민감도)을 내보내고 불러옴
+function download(blob, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+$("exportSet").addEventListener("click", () => {
+  const data = { app: "gesture-slides", savedAt: new Date().toISOString(), ...settings };
+  download(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }), "팔짓 슬라이드 설정.json");
+  toast("설정 파일을 저장했어요");
+});
+$("importSet").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  try {
+    const s = JSON.parse(await f.text());
+    if (!s || typeof s !== "object" || typeof s.mapping !== "object") throw new Error("not settings");
+    settings = normalizeSettings({ ver: DEFAULTS.ver, ...s });
+    saveSettings();
+    refreshSettingsUI();
+    toast("설정을 불러와서 적용했어요");
+  } catch {
+    toast("팔짓 슬라이드 설정 파일이 아니에요");
+  }
+});
 revertBtn.addEventListener("click", () => {
   refreshSettingsUI();
   toast("변경을 취소했어요");
@@ -867,6 +1056,13 @@ $("nextBtn").addEventListener("click", next);
 $("lastBtn").addEventListener("click", last);
 $("drawToggle").addEventListener("click", () => setDrawMode(!drawMode));
 $("clearInk").addEventListener("click", clearInk);
+$("undoInk").addEventListener("click", undoInk);
+$("exportBtn").addEventListener("click", exportPdf);
+$("timerBtn").addEventListener("click", timerReset);
+$("presenterBtn").addEventListener("click", () => {
+  const w = open("presenter.html", "gesture-slides-presenter", "width=1200,height=760");
+  if (!w) toast("팝업이 막혔어요. 주소창 오른쪽에서 팝업을 허용해 주세요");
+});
 for (const b of document.querySelectorAll(".tool")) {
   b.addEventListener("click", () => {
     setTool(b.dataset.tool);
@@ -881,13 +1077,16 @@ addEventListener("resize", () => {
 document.addEventListener("fullscreenchange", () => setTimeout(render, 100));
 
 addEventListener("keydown", (e) => {
-  if (["INPUT", "SELECT"].includes(e.target.tagName)) return;
+  if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) return;
   const k = e.key;
+  if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") { e.preventDefault(); undoInk(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (["ArrowRight", "PageDown", " "].includes(k)) { e.preventDefault(); next(); }
+  else if (e.code === "KeyP") togglePause(); // 한글 입력 상태에서도 되도록 자판 위치로 봄
   else if (["ArrowLeft", "PageUp"].includes(k)) { e.preventDefault(); prev(); }
   else if (k === "Home") first();
   else if (k === "End") last();
-  else if (k === "o" || k === "O") toggleOverview();
+  else if (e.code === "KeyO") toggleOverview();
   else if (k === "Enter" && overview) closeOverview(true);
   else if (k === "Escape") {
     if (labOpen) closeLab();
@@ -897,7 +1096,7 @@ addEventListener("keydown", (e) => {
   else if (k === "+" || k === "=") zoomIn();
   else if (k === "-") zoomOut();
   else if (k === "0") zoomReset();
-  else if (k === "f" || k === "F") toggleFullscreen();
+  else if (e.code === "KeyF") toggleFullscreen();
 });
 
 /* ================= 카메라 + 인식 모델 ================= */
@@ -918,7 +1117,11 @@ let presenting = false; // 발표 중일 때만 동작으로 기능이 실행됨
 // 카메라는 발표 중·실험 중·녹화 중 중 하나라도 쓰면 켜 둠
 async function ensureCamera() {
   if (running) return;
-  stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+  // 멀리 서 있어도 손가락이 잘 잡히도록 HD로, 움직임이 끊기지 않게 30fps로 요청 (안 되면 카메라가 되는 값으로)
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    audio: false,
+  });
   video.srcObject = stream;
   await video.play();
   if (!poseLm) {
@@ -929,11 +1132,18 @@ async function ensureCamera() {
         baseOptions: { modelAssetPath: `${MODELS}/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`, delegate: "GPU" },
         runningMode: "VIDEO",
         numPoses: 1,
+        // 움직이는 중에는 점수가 잠깐 낮아져도 놓치지 않고 이어서 따라가게 (기본 0.5)
+        minPoseDetectionConfidence: 0.4,
+        minPosePresenceConfidence: 0.4,
+        minTrackingConfidence: 0.4,
       }),
       HandLandmarker.createFromOptions(fileset, {
         baseOptions: { modelAssetPath: `${MODELS}/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`, delegate: "GPU" },
         runningMode: "VIDEO",
         numHands: 2,
+        minHandDetectionConfidence: 0.4,
+        minHandPresenceConfidence: 0.4,
+        minTrackingConfidence: 0.3,
       }),
     ]);
   }
@@ -958,6 +1168,8 @@ async function startPresenting() {
   $("cam").hidden = false;
   placeCam();
   camStatus.textContent = "카메라 연결 중…";
+  timerRun(true);
+  presenterSoon();
   try {
     await ensureCamera();
     toast("발표를 시작했어요");
@@ -975,8 +1187,65 @@ function stopPresenting() {
   $("cam").hidden = true;
   hideCursors();
   releaseCamera();
+  timerRun(false);
+  setPaused(false);
+  presenterSoon();
   toast("발표를 멈췄어요. 동작 인식도 꺼졌어요");
 }
+
+/* ---------- 동작 인식 잠시 멈춤 (질문 받을 때 등) ---------- */
+
+let paused = false;
+function setPaused(on) {
+  paused = on;
+  stage.classList.toggle("paused", paused && presenting);
+  camEl.classList.toggle("paused", paused);
+  camPause.innerHTML = paused ? ICON.play : ICON.pause;
+  camPause.title = paused ? "동작 인식 다시 시작 (P)" : "동작 인식 잠시 멈춤 (P)";
+  if (paused) hideCursors();
+  presenterSoon();
+}
+function togglePause() {
+  if (!presenting) return toast("발표 중일 때 쓸 수 있어요");
+  setPaused(!paused);
+  toast(paused ? "동작 인식을 잠시 멈췄어요" : "동작 인식을 다시 시작했어요");
+}
+const pauseHow = () => {
+  const ways = bindings().filter((b) => b.action.id === "pause").map((b) => fullLabel(b.def));
+  return [...ways, "P 키"].join(" 또는 ");
+};
+
+/* ---------- 발표 시간 ---------- */
+
+const timer = { acc: 0, start: 0 }; // acc: 지난 구간까지 잰 시간, start: 지금 재는 구간이 시작된 시각(0이면 멈춤)
+const timerMs = () => timer.acc + (timer.start ? Date.now() - timer.start : 0);
+function fmtTime(ms) {
+  const t = Math.floor(ms / 1000);
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+  const two = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${two(m)}:${two(s)}` : `${two(m)}:${two(s)}`;
+}
+function showTimer() {
+  const b = $("timerBtn");
+  b.textContent = fmtTime(timerMs());
+  b.classList.toggle("running", !!timer.start);
+}
+function timerRun(on) {
+  if (on && !timer.start) timer.start = Date.now();
+  if (!on && timer.start) {
+    timer.acc = timerMs();
+    timer.start = 0;
+  }
+  showTimer();
+}
+function timerReset() {
+  timer.acc = 0;
+  if (timer.start) timer.start = Date.now();
+  showTimer();
+  presenterSoon();
+  toast("발표 시간을 0부터 다시 재요");
+}
+setInterval(showTimer, 500);
 
 let lastVideoTime = -1;
 function loop() {
@@ -993,7 +1262,8 @@ function loop() {
 
 /* ---------- 카메라 창: 숨기기 · 옮기기 · 크기 조절 ---------- */
 
-const camEl = $("cam"), camBar = $("camBar"), camToggle = $("camToggle");
+const camEl = $("cam"), camBar = $("camBar"), camToggle = $("camToggle"), camPause = $("camPause");
+camPause.addEventListener("click", togglePause);
 const CAM_KEY = "gesture-slides.cam";
 let camLayout = { x: null, y: null, w: 280, mini: false };
 try {
@@ -1027,7 +1297,7 @@ camToggle.addEventListener("click", () => {
 
 // 막대를 끌어서 옮기기
 camBar.addEventListener("pointerdown", (e) => {
-  if (e.target === camToggle) return;
+  if (e.target.closest(".cam-btn")) return;
   const r = camEl.getBoundingClientRect();
   const dx = e.clientX - r.left, dy = e.clientY - r.top;
   camBar.setPointerCapture(e.pointerId);
@@ -1096,25 +1366,91 @@ function analyzeArm(arm, side, shoulderW) {
   };
 }
 
-// 손 모양: 손가락 끝이 둘째 마디보다 손목에서 멀면 펴진 것
+// 손가락이 펴졌는지: 손가락 끝이 둘째 마디보다 손목에서 얼마나 먼지 (비율)
+// 경계값 하나로 자르면 움직일 때 떨림 때문에 프레임마다 펴짐/굽힘이 뒤집힘 →
+// 확실히 펴짐(on) / 확실히 굽힘(off) 사이 애매한 구간에서는 직전 판정을 그대로 씀
+const FINGER = { on: 1.15, off: 1.0 }; // 검지~새끼 (끝까지 거리 ÷ 둘째 마디까지 거리)
+const THUMB = { on: 0.55, off: 0.42 }; // 엄지 끝 ~ 검지 뿌리 거리 ÷ 손바닥 길이
+
 function handInfo(h, handed) {
   const p = (i) => ({ x: h[i].x * A, y: h[i].y });
   const w = p(0);
   const palm = dist(w, p(9)) || 1e-3;
-  const ext = (tip, pip) => dist(w, p(tip)) > dist(w, p(pip)) * 1.15;
-  const f = [ext(8, 6), ext(12, 10), ext(16, 14), ext(20, 18)];
-  const thumb = dist(p(4), p(5)) > 0.55 * palm;
-  const thumbUpward = p(4).y < p(5).y - 0.35 * palm;
+  const ratio = (tip, pip) => dist(w, p(tip)) / (dist(w, p(pip)) || 1e-3);
+  // MediaPipe의 왼손/오른손 표시는 거울 영상 기준이라 원본 영상에서는 반대
+  const guess = handed?.[0]?.categoryName === "Left" ? "R" : "L";
+  const info = {
+    pts: h.map((_, i) => p(i)),
+    wrist: w,
+    tip: p(8),
+    ratios: [dist(p(4), p(5)) / palm, ratio(8, 6), ratio(12, 10), ratio(16, 14), ratio(20, 18)],
+    thumbUpward: p(4).y < p(5).y - 0.35 * palm,
+    ext: null,
+    shape: null,
+    guess,
+    side: null,
+    shown: false,
+  };
+  classifyHand(info, null);
+  return info;
+}
+
+// prev: 같은 손의 직전 프레임 펴짐 상태 [엄지, 검지, 중지, 약지, 새끼] (없으면 null)
+function classifyHand(info, prev) {
+  info.ext = info.ratios.map((r, i) => {
+    const t = i === 0 ? THUMB : FINGER;
+    if (r >= t.on) return 1;
+    if (r <= t.off) return 0;
+    return prev ? prev[i] : r >= (t.on + t.off) / 2 ? 1 : 0;
+  });
+  const [thumb, ...f] = info.ext.map(Boolean);
   const n = f.filter(Boolean).length;
   let shape = null;
   if (n === 4 && thumb) shape = "palm";
-  else if (n === 0 && thumb && thumbUpward) shape = "thumbUp";
+  else if (n === 0 && thumb && info.thumbUpward) shape = "thumbUp";
   else if (n === 0) shape = "fist";
   else if (f[0] && !f[1] && !f[2] && !f[3]) shape = "point";
   else if (f[0] && f[1] && !f[2] && !f[3]) shape = "vsign";
-  // MediaPipe의 왼손/오른손 표시는 거울 영상 기준이라 원본 영상에서는 반대
-  const guess = handed?.[0]?.categoryName === "Left" ? "R" : "L";
-  return { pts: h.map((_, i) => p(i)), wrist: w, tip: p(8), ext: [thumb, ...f].map(Number), shape, guess, side: null, shown: false };
+  info.shape = shape;
+}
+
+// 손 모양 흔들림 거르기 (손마다)
+// - 다른 모양으로 바뀌려면 2프레임 연속 그 모양이어야 함 (한 프레임짜리 잘못된 판정 무시)
+// - 모양을 잠깐 못 알아봐도(빈 판정) 0.25초까지는 직전 모양 유지
+const SHAPE = { confirm: 2, keepMs: 250 };
+const shapeMem = {
+  L: { ext: null, stable: null, cand: null, count: 0, at: 0 },
+  R: { ext: null, stable: null, cand: null, count: 0, at: 0 },
+};
+function smoothHand(side, h, now) {
+  const m = shapeMem[side];
+  if (h) {
+    classifyHand(h, m.ext);
+    m.ext = h.ext;
+  } else if (now - m.at > SHAPE.keepMs) {
+    m.ext = null; // 손을 오래 놓치면 직전 상태를 잊음
+  }
+  const raw = h && h.shown ? h.shape : null;
+  if (raw && raw === m.stable) {
+    m.at = now;
+    m.cand = null;
+    m.count = 0;
+  } else if (raw) {
+    m.count = raw === m.cand ? m.count + 1 : 1;
+    m.cand = raw;
+    if (m.count >= SHAPE.confirm || !m.stable) {
+      // 처음 잡힌 모양은 바로 받고, 다른 모양으로 바뀔 때만 확인을 거침
+      if (m.count >= SHAPE.confirm || now - m.at > SHAPE.keepMs) {
+        m.stable = raw;
+        m.at = now;
+        m.cand = null;
+        m.count = 0;
+      }
+    }
+  }
+  if (m.stable && now - m.at > SHAPE.keepMs) m.stable = null;
+  if (h) h.shape = m.stable;
+  return m.stable;
 }
 
 // 손을 왼손/오른손에 배정: 포즈의 손목과 가까운 쪽 (포즈가 없으면 모델의 추정값)
@@ -1335,7 +1671,7 @@ let lastFire = 0;
 function step(id, on, now, holdMs) {
   const g = gState(id);
   if (on) g.lastOn = now;
-  else if (now - g.lastOn < 150) on = true; // 인식이 한두 프레임 끊겨도 이어서 셈
+  else if (now - g.lastOn < 250) on = true; // 움직이다 인식이 몇 프레임 끊겨도 이어서 셈
   g.active = on;
   if (on) {
     g.offSince = 0;
@@ -1542,6 +1878,11 @@ function onFrame(lm, hands, handedness, now) {
   for (const h of handInfos) {
     // 손을 가슴 높이 이상으로 들어 보여줄 때만 손 모양으로 인식
     h.shown = !body || h.wrist.y < body.shoulderY + 0.8 * body.W;
+    if (!h.side) h.shape = null;
+  }
+  // 손마다 직전 프레임과 이어서 판정 (움직이는 중 생기는 한두 프레임짜리 오판정을 거름)
+  for (const s of SIDES) smoothHand(s, handBySide[s], now);
+  for (const h of handInfos) {
     drawHand(ctx, h);
     if (h.side && h.shown && h.shape) act[h.side].add(h.shape);
   }
@@ -1561,11 +1902,18 @@ function onFrame(lm, hands, handedness, now) {
   if (!presenting) return; // 발표 중지 상태에서는 동작으로 아무것도 실행하지 않음
 
   for (const b of hits) {
+    if (paused && !b.action.always) continue; // 멈춘 동안에는 '다시 시작'만 받음
     flashAt[b.action.id] = now;
     if (now - lastFire > 500) {
       lastFire = now;
       b.action.run();
     }
+  }
+  if (paused) {
+    hideCursors();
+    camStatus.textContent = `잠시 멈춤 · ${pauseHow()}로 다시 시작`;
+    if (!settingsEl.hidden) updateDots(holding, now);
+    return;
   }
   updateMoveCursor(holding.has("pan") && handOf("pan", act, handBySide), body);
   updateDrawCursor(holding.has("draw") && handOf("draw", act, handBySide), body, now);
@@ -1770,3 +2118,124 @@ function drawLab(lm, handInfos) {
     drawHandOn(ctx, hd, at, hd.side === "L" ? "#ffb547" : "#ff6bcb", 3); // 왼손 주황, 오른손 분홍
   }
 }
+
+/* ================= 새로고침해도 자료 · 글씨 · 메모 유지 ================= */
+
+// 브라우저 안(IndexedDB)에 마지막으로 연 자료 한 벌만 보관
+// "files": { id, name, files }  /  "state": { id, current, inks, notes }
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("gesture-slides", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("deck");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbDo(mode, fn) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("deck", mode);
+    const req = fn(tx.objectStore("deck"));
+    tx.oncomplete = () => {
+      db.close();
+      res(req.result);
+    };
+    tx.onerror = () => rej(tx.error);
+  });
+}
+const idbSet = (key, val) => idbDo("readwrite", (st) => st.put(val, key));
+const idbGet = (key) => idbDo("readonly", (st) => st.get(key));
+
+let persistTimer;
+function persistSoon() {
+  if (!deckId) return;
+  clearTimeout(persistTimer);
+  const id = deckId;
+  persistTimer = setTimeout(() => {
+    if (id !== deckId) return;
+    idbSet("state", { id, current, inks: [...inks], notes: [...notes] }).catch((err) => console.warn(err));
+  }, 500);
+}
+
+async function restoreDeck() {
+  try {
+    const f = await idbGet("files");
+    if (!f?.files?.length || slides.length) return;
+    const st = await idbGet("state");
+    await loadFiles(f.files, { id: f.id, ...(st?.id === f.id ? st : {}) });
+    if (slides.length) toast("지난번에 보던 발표자료를 다시 열었어요");
+  } catch (err) {
+    console.warn("지난 자료를 열지 못했어요", err);
+  }
+}
+
+/* ================= 발표자 화면 (다른 창) ================= */
+
+// 슬라이드별 메모 (발표자 화면에서 씀)
+const notes = new Map();
+const channel = new BroadcastChannel("gesture-slides");
+let presenterOpen = false;
+let presenterTimer = null;
+let sendSeq = 0;
+let imgCache = { key: "", cur: null, next: null };
+
+const toBlob = (canvas) => new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+
+function presenterSoon(ms = 120) {
+  if (!presenterOpen) return;
+  clearTimeout(presenterTimer);
+  presenterTimer = setTimeout(sendPresenter, ms);
+}
+
+async function sendPresenter() {
+  const seq = ++sendSeq;
+  const msg = {
+    type: "state",
+    deck: deckName,
+    i: current,
+    n: slides.length,
+    note: notes.get(current) ?? "",
+    timer: { ...timer, now: Date.now() },
+    presenting,
+    paused,
+    pauseHow: pauseHow(),
+  };
+  if (slides.length) {
+    // 같은 슬라이드 · 같은 글씨면 이미지를 다시 만들지 않음
+    const key = `${deckId}:${current}:${inkVer}`;
+    if (imgCache.key !== key) {
+      const i = current;
+      const [cur, next] = await Promise.all([
+        slideImage(i, 1400).then(toBlob),
+        i + 1 < slides.length ? slideImage(i + 1, 800).then(toBlob) : null,
+      ]);
+      if (seq !== sendSeq) return; // 그새 또 바뀜 → 나중 것만 보냄
+      imgCache = { key, cur, next };
+    }
+    msg.cur = imgCache.cur;
+    msg.next = imgCache.next;
+  }
+  channel.postMessage(msg);
+}
+
+const PRESENTER_CMDS = { next, prev, first, last, pause: togglePause, timerReset, overview: toggleOverview };
+channel.addEventListener("message", ({ data: m }) => {
+  if (!m || typeof m !== "object") return;
+  if (m.type === "hello") {
+    presenterOpen = true;
+    presenterSoon(0);
+  } else if (m.type === "bye") {
+    presenterOpen = false;
+  } else if (m.type === "cmd") {
+    PRESENTER_CMDS[m.cmd]?.();
+  } else if (m.type === "note" && Number.isInteger(m.i) && m.i >= 0 && m.i < slides.length && typeof m.text === "string") {
+    if (m.text.trim()) notes.set(m.i, m.text.slice(0, 5000));
+    else notes.delete(m.i);
+    persistSoon();
+  }
+});
+// 이 창을 새로고침했을 때 이미 열린 발표자 화면이 다시 붙도록 알림
+channel.postMessage({ type: "main-ready" });
+
+showTimer();
+restoreDeck();

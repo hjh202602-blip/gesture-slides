@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>발표자 화면 · 팔짓 슬라이드</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="presenter.css">
+</head>
+<body class="presenter">
+  <header id="pBar">
+    <strong class="logo">발표자 화면</strong>
+    <span id="pDeck" class="deck-name"></span>
+    <span class="spacer"></span>
+    <span id="pState" class="p-state">연결 중…</span>
+    <span id="pClock" class="p-clock">--:--</span>
+  </header>
+
+  <main id="pMain">
+    <section class="p-now">
+      <div class="p-label">지금 슬라이드 <b id="pCount">– / –</b></div>
+      <div class="p-frame big"><img id="pCur" alt="지금 슬라이드"><p class="p-empty" id="pCurEmpty">발표 창에서 자료를 열어주세요</p></div>
+    </section>
+
+    <aside class="p-side">
+      <div class="p-label">다음 슬라이드</div>
+      <div class="p-frame"><img id="pNext" alt="다음 슬라이드"><p class="p-empty" id="pNextEmpty">마지막 슬라이드예요</p></div>
+
+      <div class="p-timer">
+        <div class="p-label">발표 시간</div>
+        <div id="pTime" class="p-time">00:00</div>
+        <button id="pTimerReset" class="btn small" title="발표 시간을 0으로">0으로</button>
+      </div>
+
+      <div class="p-nav">
+        <button class="btn" data-cmd="first" title="첫 슬라이드" aria-label="첫 슬라이드"><svg class="ic" viewBox="0 0 24 24"><path d="M6 5v14"/><path d="m18 6-6 6 6 6"/></svg></button>
+        <button class="btn grow" data-cmd="prev"><svg class="ic" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>이전</button>
+        <button class="btn primary grow" data-cmd="next">다음<svg class="ic" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+        <button class="btn" data-cmd="last" title="마지막 슬라이드" aria-label="마지막 슬라이드"><svg class="ic" viewBox="0 0 24 24"><path d="M18 5v14"/><path d="m6 6 6 6-6 6"/></svg></button>
+      </div>
+      <button id="pPause" class="btn p-pause" data-cmd="pause" title="동작 인식 잠시 멈춤 / 다시 시작 (P)">동작 인식 멈춤</button>
+    </aside>
+
+    <section class="p-notes">
+      <label class="p-label" for="pNote">이 슬라이드 메모 <small>쓰는 대로 저장돼요 · 청중에게는 안 보여요</small></label>
+      <textarea id="pNote" placeholder="이 슬라이드에서 말할 내용을 적어 두세요" disabled></textarea>
+    </section>
+  </main>
+
+  <script src="presenter.js"></script>
+</body>
+</html>
