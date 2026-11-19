@@ -67,6 +67,22 @@
 .p-nav .btn { height: 44px; }
 .p-nav .btn.grow { flex: 1; font-size: 14px; }
 .p-pause { height: 36px; }
+#pBar { background: linear-gradient(var(--surface), #121318); }
+#pMain { animation: rise .45s var(--ease) both; }
+.p-frame { box-shadow: 0 0 0 1px #ffffff06, 0 16px 40px -16px #000c; }
+.p-frame img { border-radius: 4px; }
+.p-timer { border-radius: var(--r-lg); }
+.p-state { transition: color .2s var(--ease); }
+.p-state.live::before {
+  content: "";
+  display: inline-block;
+  width: 7px; height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  vertical-align: 1px;
+  animation: blink 2s ease-in-out infinite;
+}
 .p-pause.on { background: #3a2c14; border-color: #e5a54b66; color: var(--warn); }
 
 #pNote {
@@ -83,7 +99,8 @@
   font-size: 16px;
   line-height: 1.6;
 }
-#pNote:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+#pNote { transition: border-color .18s var(--ease), box-shadow .18s var(--ease); }
+#pNote:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
 #pNote:disabled { opacity: .5; }
 
 @media (max-width: 820px) {
